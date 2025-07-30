@@ -1,82 +1,93 @@
+# .github/workflows/main.yml
+
 name: CI/CD DevSecOps para FastAPI con CQRS
 
+# Define cuándo se ejecutará este workflow
 on:
   push:
     branches:
-      - main
+      - main # Se ejecutará cada vez que haya un push a la rama 'main'
   pull_request:
     branches:
-      - main
+      - main # Se ejecutará cada vez que se abra o actualice un pull request a 'main'
 
 jobs:
   build-and-scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # Ejecuta el job en un runner de Ubuntu
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout del código
+      uses: actions/checkout@v4 # Acción para clonar el repositorio
 
-      - name: Configurar variables de docker
-        id: docker_vars
-        run: |
-           echo "IMAGE_NAME=invalidtruck/cqrs_fastapi" >> $GITHUB_OUTPUT
-           echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
-      
-      - name: Iniciar sesion docker
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+    - name: Configurar variables de Docker
+      id: docker_vars
+      run: |
+        # Define el nombre de la imagen Docker
+        # Asegúrate de que 'invalidtruck/cqrs_fastapi' sea el nombre correcto de tu imagen en Docker Hub
+        echo "IMAGE_NAME=invalidtruck/cqrs_fastapi" >> $GITHUB_OUTPUT
+        # Define la etiqueta de la imagen usando el SHA del commit
+        echo "IMAGE_TAG=$(echo $GITHUB_SHA | cut -c 1-7)" >> $GITHUB_OUTPUT
 
-      - name : Build Docker image
-        run: |
-          uses: docker/build-push-action@v5
-          push: false
-          tags: ${{ steps.docker_vars.outputs.IMAGE_NAME }}:${{ steps.docker_vars.outputs.IMAGE_TAG }}
-          load: true
+    - name: Iniciar sesión en Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }} # Usa el secreto de GitHub para el usuario
+        password: ${{ secrets.DOCKER_PASSWORD }} # Usa el secreto de GitHub para la contraseña/token
 
-      - name: Escaneare la imagen docker con trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ steps.docker_vars.outputs.IMAGE_NAME }}:${{ steps.docker_vars.outputs.IMAGE_TAG }}
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH,MEDIUM'
+    - name: Construir la imagen Docker
+      # La acción 'uses:' debe estar directamente bajo el 'name:' del step, no bajo 'run:'
+      uses: docker/build-push-action@v5
+      with:
+        context: . # El contexto de construcción es el directorio actual del repositorio
+        push: false # No subimos la imagen todavía, solo la construimos localmente para el escaneo
+        tags: ${{ steps.docker_vars.outputs.IMAGE_NAME }}:${{ steps.docker_vars.outputs.IMAGE_TAG }}
+        load: true # Carga la imagen en el demonio Docker del runner para que Trivy pueda acceder a ella
 
-      - name: Subir la imagen docker
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.docker_vars.outputs.IMAGE_NAME }}:${{ steps.docker_vars.outputs.IMAGE_TAG }}
+    - name: Escanear la imagen Docker con Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.docker_vars.outputs.IMAGE_NAME }}:${{ steps.docker_vars.outputs.IMAGE_TAG }}
+        format: 'table' # Formato de salida de Trivy (también puedes usar 'json', 'sarif')
+        exit-code: '1' # Falla el job si se encuentran vulnerabilidades (ajusta según tu tolerancia)
+        ignore-unfixed: true # Ignora vulnerabilidades sin parche disponible (ajusta según tu política)
+        vuln-type: 'os,library' # Tipos de vulnerabilidades a escanear
+        severity: 'CRITICAL,HIGH,MEDIUM' # Niveles de severidad que causarán un fallo (ajusta según tu política)
+        # Puedes añadir más opciones de Trivy aquí, como --scanners 'misconfig,secret' para escanear configuraciones erróneas y secretos
 
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
+    - name: Subir la imagen Docker a Docker Hub
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true # Ahora sí subimos la imagen
+        tags: ${{ steps.docker_vars.outputs.IMAGE_NAME }}:${{ steps.docker_vars.outputs.IMAGE_TAG }}
 
-      - name: instalar bandit
-        run: |
-          python -m pip install --upgrade pip
-          pip install bandit
+    # Opcional: Añadir un escaneo de seguridad estático (SAST) para el código Python con Bandit
+    # Este paso se ejecuta antes de la construcción de la imagen, sobre el código fuente
+    - name: Configurar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9' # Asegúrate de que coincida con la versión de tu Dockerfile
 
+    - name: Instalar Bandit y dependencias de la aplicación
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit fastapi uvicorn pydantic pytest
+        # Estas dependencias se instalan aquí para el escaneo de Bandit y/o para ejecutar pruebas
+        # en el runner de GitHub Actions si las añades en un paso posterior.
 
+    - name: Ejecutar escaneo SAST con Bandit
+      run: |
+        bandit -r app/ -ll -f custom_json -o bandit-report.json || true # Escanea el directorio 'app'
+        # '-ll' para nivel de logging, '-f custom_json -o bandit-report.json' para salida en JSON
+        # '|| true' para que el job no falle inmediatamente si Bandit encuentra problemas,
+        # permitiendo que el resto del pipeline continúe y los resultados sean revisados.
+        # Si quieres que falle, quita '|| true'.
 
-      - name: Install fastapi
-        run: |
-          python -m pip install --upgrade pip
-          pip install fastapi uvicorn pydantic pytest
+    - name: Subir reporte de Bandit (artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: bandit-report
+        path: bandit-report.json
+        # Retain the artifact for a certain number of days
+        retention-days: 5
 
-      - name: ejecutar escaneo SAST con bandit
-        run: |
-          bandit -r app/ -ll -f custom_json -o bandit-report.json || true
-
-      - name: Subir repote de bandit (artifact) 
-        uses: actions/upload-artifact@v4
-        with:
-          name: bandit-report
-          path: bandit-report.json
-          retention-days: 5
